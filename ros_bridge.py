@@ -99,8 +99,8 @@ class ROSBridge:
 def main(args=None):
 
     joint_positions = [
-        1.47976908493042,   # shoulder_pan_joint
-        -1.689188142816061,  # shoulder_lift_joint
+        0.87976908493042,   # shoulder_pan_joint
+        -1.789188142816061,  # shoulder_lift_joint
         1.5098281065570276,  # elbow_joint
         -0.010845021610595751,  # wrist_1_joint
         1.440675139427185,   # wrist_2_joint
@@ -124,7 +124,7 @@ if __name__ == '__main__':
     # Clear the queue before starting (to remove any message from previous sand_gym session)
     r.delete("joints_queue")
     bridge = ROSBridge()
-    
+    print('Running UR5e Bridge')
     
     while True:
         # Block's until a message arrives on "task_queue"
@@ -133,6 +133,8 @@ if __name__ == '__main__':
 
         try:
             joint_positions = json.loads(message)
+            joint_positions[0] = joint_positions[0] + 1.57 # To correct the Robot Orientation on the table 
+            joint_positions[1] = joint_positions[1] - 0.2  # TODO : Remove this (It exists To avoid the gripper crash with the table) 
             bridge.publish_joint_angles(joint_positions)
             
             response = "successfully published joints"
