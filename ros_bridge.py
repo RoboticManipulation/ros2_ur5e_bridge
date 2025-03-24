@@ -42,7 +42,7 @@ class TFToRedisPublisher(Node):
                 now,
                 timeout=rclpy.duration.Duration(seconds=1.0)
             )
-            
+            timestamp = trans.header.stamp.sec + trans.header.stamp.nanosec * 1e-9
             position = {
                 'x': trans.transform.translation.x,
                 'y': trans.transform.translation.y,
@@ -58,11 +58,12 @@ class TFToRedisPublisher(Node):
 
             tf_data = {
                 'position': position,
-                'orientation': orientation
+                'orientation': orientation,
+                'timestamp': timestamp,
             }
 
             self.redis_client.set("custom_gripper_grasp_point_tf", json.dumps(tf_data))
-            # self.get_logger().info("Published TF to Redis")
+            self.get_logger().info(f"Published TF to Redis : {tf_data}")
 
         except Exception as e:
             self.get_logger().warn(f"Failed to get transform: {e}")
@@ -127,8 +128,10 @@ class URController(Node):
 
 
 class GripperVelocityTracker(Node):
-    def __init__(self):
+    def __init__(self, redis_client):
         super().__init__('gripper_velocity_tracker')
+        
+        self.redis_client = redis_client
         
         # Parameters
         self.frame_id = 'custom_gripper_grasp_point'
@@ -228,6 +231,12 @@ class GripperVelocityTracker(Node):
                     if int(current_timestamp) > int(self.prev_timestamp):
                         linear_speed = np.linalg.norm(linear_velocity)
                         angular_speed = np.linalg.norm(angular_velocity)
+                        end_effector_speed = {
+                            'linear_speed': linear_speed,
+                            'angular_speed': angular_speed,
+                        }
+
+                        self.redis_client.set("end_effector_speed", json.dumps(end_effector_speed))
                         self.get_logger().info(
                             f'Linear velocity: {linear_speed:.3f} m/s, Angular velocity: {angular_speed:.3f} rad/s'
                         )
@@ -321,9 +330,8 @@ class ROSBridge:
         self.robot_joint_position = []
         self.executor1 = SingleThreadedExecutor()
        
-        # # Add nodes to the executors
+
         self.executor1.add_node(self.joint_trajectory_client)
-        # # # Start the executor in a separate thread
         self.executor_thread1 = threading.Thread(target=self.spin_executor1, daemon=True)     
         self.executor_thread1.start()
         
@@ -336,7 +344,7 @@ class ROSBridge:
         self.executor_thread2 = threading.Thread(target=self.spin_executor2, daemon=True)     
         self.executor_thread2.start()
         
-        self.gripper_velocity_tracker=GripperVelocityTracker()
+        self.gripper_velocity_tracker=GripperVelocityTracker(self.redis_client)
         
         self.executor3 = SingleThreadedExecutor()
         self.executor3.add_node(self.gripper_velocity_tracker)
