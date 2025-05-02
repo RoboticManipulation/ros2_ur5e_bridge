@@ -9,7 +9,7 @@ import threading
 import json
 import redis
 
-from tf2_ros import TransformListener, Buffer
+from tf2_ros import Buffer, TransformListener, LookupException, ConnectivityException, ExtrapolationException
 from geometry_msgs.msg import TransformStamped
 from rclpy.node import Node
 import time
@@ -20,6 +20,17 @@ import tf2_ros
 from tf2_ros import TransformException
 import numpy as np
 from geometry_msgs.msg import Vector3
+
+
+from sensor_msgs.msg import PointCloud2
+import sensor_msgs_py.point_cloud2 as pc2
+import open3d as o3d
+
+from scipy.spatial.transform import Rotation as R
+from geometry_msgs.msg import TransformStamped
+import zlib
+import pickle
+
 
 REDIS_HOST = "172.17.0.1"  
 REDIS_PORT = 6379
@@ -37,8 +48,8 @@ class TFToRedisPublisher(Node):
         try:
             now = rclpy.time.Time()
             trans: TransformStamped = self.tf_buffer.lookup_transform(
-                'base_link',  # parent frame
-                'custom_gripper_grasp_point',  # child frame
+                'mujuco_world',  # parent frame
+                'corrected_custom_gripper_grasp_point',  # child frame
                 now,
                 timeout=rclpy.duration.Duration(seconds=1.0)
             )
@@ -229,14 +240,32 @@ class GripperVelocityTracker(Node):
                     
                     # Log velocities at a reduced rate (every second)
                     if int(current_timestamp) > int(self.prev_timestamp):
-                        linear_speed = np.linalg.norm(linear_velocity)
-                        angular_speed = np.linalg.norm(angular_velocity)
+                        # linear_speed = np.linalg.norm(linear_velocity)
+                        # angular_speed = np.linalg.norm(angular_velocity)
+                        # end_effector_speed = {
+                        #   'linear_speed': round(linear_speed, 3),
+                        #   'angular_speed': round(angular_speed, 3),
+                        # }
+                        
                         end_effector_speed = {
-                            'linear_speed': linear_speed,
-                            'angular_speed': angular_speed,
+                            'linear_velocity': {
+                                'x': round(linear_velocity[0], 3),
+                                'y': round(linear_velocity[1], 3),
+                                'z': round(linear_velocity[2], 3)
+                            },
+                            'angular_velocity': {
+                                'x': round(angular_velocity[0], 3),
+                                'y': round(angular_velocity[1], 3),
+                                'z': round(angular_velocity[2], 3)
+                            }
                         }
 
                         self.redis_client.set("end_effector_speed", json.dumps(end_effector_speed))
+                        
+                        # For logging purposes, calculate the magnitudes
+                        linear_speed = np.linalg.norm(linear_velocity)
+                        angular_speed = np.linalg.norm(angular_velocity)
+                        
                         self.get_logger().info(
                             f'Linear velocity: {linear_speed:.3f} m/s, Angular velocity: {angular_speed:.3f} rad/s'
                         )
@@ -321,6 +350,273 @@ class GripperVelocityTracker(Node):
         return np.array([-q[0], -q[1], -q[2], q[3]]) / np.sum(q**2)
 
 
+
+class SandBoxTransformPublisherNode(Node):
+    def __init__(self):
+        super().__init__('sandbox_transform_publisher_node')
+        
+        # Create a static transform broadcaster
+        self.tf_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
+        
+        # Define the transforms to publish
+        transforms = []
+        
+        # Parent frame
+        parent_frame = 'tagStandard52h13:3'
+        
+        # Define offsets as (x, y, z) tuples
+        offsets = [
+            (0.0, 0.0, 0.0),
+            (0.3, 0.0, 0.0),
+            (0.0, 0.6, 0.0),
+            (0.3, 0.6, 0.0),
+            
+            (0.0, 0.0, -0.09),
+            (0.3, 0.0, -0.09),
+            (0.0, 0.6, -0.09),
+            (0.3, 0.6, -0.09)
+        ]
+        
+        # Create the transforms
+        for i, offset in enumerate(offsets):
+            # Create a transform message
+            transform = TransformStamped()
+            
+            # Set header information
+            transform.header.stamp = self.get_clock().now().to_msg()
+            transform.header.frame_id = parent_frame
+            
+            # Set child frame with a unique name based on the offset
+            transform.child_frame_id = f'sand_box_frame_{i+1}'
+            
+            # Set translation (x, y, z)
+            transform.transform.translation.x = offset[0]
+            transform.transform.translation.y = offset[1]
+            transform.transform.translation.z = offset[2]
+            
+            # Set rotation as identity quaternion (no rotation)
+            transform.transform.rotation.x = 0.0
+            transform.transform.rotation.y = 0.0
+            transform.transform.rotation.z = 0.0
+            transform.transform.rotation.w = 1.0
+            
+            transforms.append(transform)
+            
+            self.get_logger().info(f'Created transform: {transform.header.frame_id} -> {transform.child_frame_id}')
+            self.get_logger().info(f'Translation: ({offset[0]}, {offset[1]}, {offset[2]})')
+        
+        # Broadcast all transforms
+        self.tf_broadcaster.sendTransform(transforms)
+        self.get_logger().info(f'Published {len(transforms)} static transforms')
+        
+        
+class SandBoxPointCloudSegmentation(Node):
+    def __init__(self):
+        super().__init__('pointcloud_segmentation_node')
+        self.subscription = self.create_subscription(
+            PointCloud2,
+            '/zed2i/zed_node/point_cloud/cloud_registered',
+            self.listener_callback,
+            10)
+        # self.subscription  
+        
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        
+        self.pub_cropped = self.create_publisher(
+            PointCloud2,
+            '/segmented_sandbox_pointcloud',
+            10
+        )
+        self.latest_segmented_point_cloud = []
+
+
+
+    def listener_callback(self, msg):
+        self.get_logger().info('Received point cloud')
+
+        points = []
+        for p in pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True):
+            x, y, z = map(float, p)
+            if not (np.isnan(x) or np.isnan(y) or np.isnan(z)) and \
+            not (np.isinf(x) or np.isinf(y) or np.isinf(z)):
+                points.append([x, y, z])
+
+        cloud_points = np.array(points, dtype=np.float64)
+
+
+
+        self.get_logger().info(f"PointCloud shape: {cloud_points.shape}, dtype: {cloud_points.dtype}")
+
+        if cloud_points.size == 0:
+            self.get_logger().warn("PointCloud is empty. Skipping visualization.")
+            return
+
+        # Look up the transform
+        try:
+            transform: TransformStamped = self.tf_buffer.lookup_transform(
+                target_frame='sandbox_center',#'sandbox_center',
+                source_frame='zed2i_left_camera_frame',
+                time=rclpy.time.Time(),
+                timeout=rclpy.duration.Duration(seconds=1.0)
+            )
+
+            # Extract translation and rotation
+            t = transform.transform.translation
+            q = transform.transform.rotation
+
+            translation = np.array([t.x, t.y, t.z])
+            rotation = R.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+
+            # Apply transform
+            transformed_points = (rotation @ cloud_points.T).T + translation
+            
+            
+        except (LookupException, ConnectivityException, ExtrapolationException) as e:
+            self.get_logger().warn(f"Transform failed: {e}")
+            return
+
+        try:
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(transformed_points)
+            # pcd.points = o3d.utility.Vector3dVector(cloud_points)
+            
+            bbox = o3d.geometry.AxisAlignedBoundingBox(
+                min_bound=(-0.15, -0.3, 0.0),  # bottom corner
+                max_bound=(0.15, 0.3, 0.1)     # top corner
+            )
+            bbox.color = (0, 0, 1)  # Blue box
+            pcd = pcd.crop(bbox)
+            
+
+
+            # o3d.io.write_point_cloud("output_transformed.ply", pcd)
+            # o3d.visualization.draw_geometries([pcd, bbox])
+            # Convert Open3D point cloud to NumPy array
+            cropped_np = np.asarray(pcd.points)
+            self.latest_segmented_point_cloud = cropped_np
+
+            # Create header
+            from std_msgs.msg import Header
+            header = Header()
+            header.stamp = self.get_clock().now().to_msg()
+            header.frame_id = 'sandbox_center'  
+            # Convert to PointCloud2
+            msg_out = pc2.create_cloud_xyz32(header, cropped_np.tolist())
+
+            # Publish
+            self.pub_cropped.publish(msg_out)
+            
+
+        except Exception as e:
+            self.get_logger().error(f"Open3D error: {e}")
+            return
+        
+        # Uncomment to exit 
+        # self.destroy_node()
+        
+    def get_latest_pointcloud(self):
+        return zlib.compress(pickle.dumps(self.latest_segmented_point_cloud))
+    
+import rclpy
+from rclpy.node import Node
+from tf2_ros import TransformBroadcaster, Buffer, TransformListener
+from geometry_msgs.msg import TransformStamped
+from rclpy.duration import Duration
+from rclpy.time import Time
+
+
+class FrameDifferencePublisher(Node):
+    def __init__(self):
+        super().__init__('frame_difference_publisher')
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+
+        self.broadcaster = TransformBroadcaster(self)
+
+        self.timer = self.create_timer(0.1, self.publish_difference)
+
+    def publish_difference(self):
+        try:
+            # Get transform from sand_box_center to simulation_sand_box_center
+            transform = self.tf_buffer.lookup_transform(
+                target_frame='sandbox_center',
+                source_frame='simulation_sand_box_center',
+                time=Time(),
+                timeout=Duration(seconds=1.0)
+            )
+
+            # Modify the frame_ids to indicate it's the difference
+            transform.header.stamp = self.get_clock().now().to_msg()
+            transform.header.frame_id = 'sand_box_center'
+            transform.child_frame_id = 'difference_simulation_to_real'
+
+            # Broadcast the difference transform
+            self.broadcaster.sendTransform(transform)
+
+        except Exception as e:
+            self.get_logger().warn(f'Could not find transform: {e}')
+
+
+import rclpy
+from rclpy.node import Node
+from tf2_ros import TransformListener, Buffer
+import numpy as np
+from geometry_msgs.msg import TransformStamped
+
+
+
+class TransformAverager(Node):
+    def __init__(self):
+        super().__init__('transform_averager')
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        self.timer = self.create_timer(0.01, self.timer_callback)
+
+        self.samples = []
+        self.target_frame= 'tagStandard52h13:3'
+        self.source_frame = 'zed2i_left_camera_optical_frame'
+        self.max_samples = 1000
+
+    def timer_callback(self):
+        try:
+            now = rclpy.time.Time()
+            trans = self.tf_buffer.lookup_transform(
+                self.source_frame,
+                self.target_frame,
+                now)
+            
+            self.samples.append(trans)
+
+            if len(self.samples) >= self.max_samples:
+                self.timer.cancel()
+                self.average_transform()
+
+        except Exception as e:
+            self.get_logger().info(f'Transform not available yet: {e}')
+
+    def average_transform(self):
+        translations = np.array([[t.transform.translation.x,
+                                  t.transform.translation.y,
+                                  t.transform.translation.z] for t in self.samples])
+        
+        quaternions = np.array([[t.transform.rotation.x,
+                                 t.transform.rotation.y,
+                                 t.transform.rotation.z,
+                                 t.transform.rotation.w] for t in self.samples])
+        
+        avg_translation = np.mean(translations, axis=0)
+        
+        # Average quaternions via normalized sum (approximation)
+        avg_quat = np.mean(quaternions, axis=0)
+        avg_quat = avg_quat / np.linalg.norm(avg_quat)
+
+        self.get_logger().info(f"Averaged Translation: {avg_translation}")
+        self.get_logger().info(f"Averaged Quaternion: {avg_quat}")
+
+
+
+
 class ROSBridge:
   
     def __init__(self):
@@ -329,27 +625,35 @@ class ROSBridge:
         self.joint_trajectory_client = URController()
         self.robot_joint_position = []
         self.executor1 = SingleThreadedExecutor()
-       
-
         self.executor1.add_node(self.joint_trajectory_client)
         self.executor_thread1 = threading.Thread(target=self.spin_executor1, daemon=True)     
         self.executor_thread1.start()
         
         self.redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        
         self.tf_publisher = TFToRedisPublisher(self.redis_client)
-        
-        
         self.executor2 = SingleThreadedExecutor()
         self.executor2.add_node(self.tf_publisher)
         self.executor_thread2 = threading.Thread(target=self.spin_executor2, daemon=True)     
         self.executor_thread2.start()
         
         self.gripper_velocity_tracker=GripperVelocityTracker(self.redis_client)
-        
         self.executor3 = SingleThreadedExecutor()
         self.executor3.add_node(self.gripper_velocity_tracker)
         self.executor_thread3 = threading.Thread(target=self.spin_executor3, daemon=True)     
         self.executor_thread3.start()
+        
+        # self.temporary_node = TransformAverager()
+        # self.executor4 = SingleThreadedExecutor()
+        # self.executor4.add_node(self.temporary_node)
+        # self.executor_thread4 = threading.Thread(target=self.spin_executor4, daemon=True)     
+        # self.executor_thread4.start()
+        
+        self.point_cloud_segmentation = SandBoxPointCloudSegmentation()
+        self.executor5 = SingleThreadedExecutor()
+        self.executor5.add_node(self.point_cloud_segmentation)
+        self.executor_thread5 = threading.Thread(target=self.spin_executor5, daemon=True)     
+        self.executor_thread5.start()
 
 
         
@@ -380,9 +684,30 @@ class ROSBridge:
         finally:
             self.executor3.shutdown()
             
+    def spin_executor4(self):
+        try:
+            self.executor4.spin()
+           
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.executor4.shutdown()
+            
+    def spin_executor5(self):
+        try:
+            self.executor5.spin()
+           
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.executor5.shutdown()
+            
             
     def publish_joint_angles(self, joint_positions):
         self.joint_trajectory_client.send_goal_sync(joint_positions)
+        
+    def get_latest_pointcloud(self):
+        return self.point_cloud_segmentation.get_latest_pointcloud()
 
 def main(args=None):
 
@@ -423,7 +748,6 @@ if __name__ == '__main__':
   
     
 
-
     r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
     
     # Clear the queue before starting (to remove any message from previous sand_gym session)
@@ -431,26 +755,53 @@ if __name__ == '__main__':
     bridge = ROSBridge()
     print('Running UR5e Bridge')
     
-    while True:
-        # Block's until a message arrives on "task_queue"
-        _, message = r.blpop("joints_queue")
-        print(f"Received task: {message}")
+    # while True:
+       
+    #     _, message = r.blpop("joints_queue")
+    #     print(f"Received task: {message}")
 
-        try:
-            joint_positions = json.loads(message)
-            joint_positions[0] = joint_positions[0] + (3.14/2) # To correct the Robot Orientation on the table 
-            joint_positions[5] = joint_positions[5] + (3.14/4) # To correct the Gripper Orientation 
+    #     try:
+    #         joint_positions = json.loads(message)
+    #         joint_positions[0] = joint_positions[0] + (3.14/2) # To correct the Robot Orientation on the table 
+    #         joint_positions[5] = joint_positions[5] + (3.14/4) # To correct the Gripper Orientation 
     
     
-            joint_positions[1] = joint_positions[1] - 0.2  # TODO : Remove this (It exists To avoid the gripper crash with the table) 
-            bridge.publish_joint_angles(joint_positions)
+    #         # joint_positions[1] = joint_positions[1] - 0.2  # TODO : Remove this (It exists To avoid the gripper crash with the table) 
+    #         bridge.publish_joint_angles(joint_positions)
             
-            response = "successfully published joints"
+    #         response = "successfully published joints"
                 
-        except (json.JSONDecodeError, TypeError):
+    #     except (json.JSONDecodeError, TypeError):
 
-            response = "Something wrong publishing joints"
+    #         response = "Something wrong publishing joints"
 
-        # Pushing the response to "joints_response_queue"
-        r.lpush("joints_response_queue", response)
+    #     # Pushing the response to "joints_response_queue"
+    #     r.lpush("joints_response_queue", response)
+    
+    while True:
+        # Block for 1 sec waiting on either queue (non-blocking simulation)
+        task_msg = r.blpop(["joints_queue", "pointcloud_request"], timeout=1)
+
+        if task_msg:
+            queue_name, message = task_msg
+
+            if queue_name == "joints_queue":
+                print(f"Received task: {message}")
+                try:
+                    joint_positions = json.loads(message)
+                    joint_positions[0] += (3.14 / 2)
+                    joint_positions[5] += (3.14 / 4)
+
+                    bridge.publish_joint_angles(joint_positions)
+                    response = "successfully published joints"
+
+                except (json.JSONDecodeError, TypeError):
+                    response = "Something wrong publishing joints"
+
+                r.lpush("joints_response_queue", response)
+
+            elif queue_name == "pointcloud_request":
+                print("Received pointcloud request!")
+                pc = bridge.get_latest_pointcloud()
+                r.publish("pointcloud_data", pc)
         
