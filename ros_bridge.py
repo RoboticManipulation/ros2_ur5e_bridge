@@ -35,7 +35,7 @@ import pickle
 REDIS_HOST = "172.17.0.1"  
 REDIS_PORT = 6379
 
-class TFToRedisPublisher(Node):
+class EndEffectorTFToRedisPublisher(Node):
     def __init__(self, redis_client):
         super().__init__('tf_to_redis_publisher')
         self.tf_buffer = Buffer()
@@ -43,13 +43,20 @@ class TFToRedisPublisher(Node):
         self.redis_client = redis_client
 
         self.timer = self.create_timer(0.5, self.publish_tf_to_redis)  # every 0.5s
+        self.timer = self.create_timer(0.5, self.publish_tool0_tf_to_redis)  # every 0.5s
+        self.timer = self.create_timer(0.5, self.publish_tf_wrt_sandboxcenter_to_redis)  # every 0.5s
+        
+        # Buffers to store samples
+        # self.position_samples = []
+        # self.orientation_samples = []
+        # self.max_samples = 100  # Number of samples to average
 
     def publish_tf_to_redis(self):
         try:
             now = rclpy.time.Time()
             trans: TransformStamped = self.tf_buffer.lookup_transform(
                 'mujuco_world',  # parent frame
-                'corrected_custom_gripper_grasp_point',  # child frame
+                'custom_gripper_grasp_point',  # child frame
                 now,
                 timeout=rclpy.duration.Duration(seconds=1.0)
             )
@@ -74,7 +81,135 @@ class TFToRedisPublisher(Node):
             }
 
             self.redis_client.set("custom_gripper_grasp_point_tf", json.dumps(tf_data))
-            self.get_logger().info(f"Published TF to Redis : {tf_data}")
+            # self.get_logger().info(f"Published TF to Redis : {tf_data}")
+
+        except Exception as e:
+            self.get_logger().warn(f"Failed to get transform: {e}")
+    
+    # def publish_tf_to_redis(self):
+    #     try:
+    #         now = rclpy.time.Time()
+    #         trans: TransformStamped = self.tf_buffer.lookup_transform(
+    #             'mujuco_world',  # parent frame
+    #             'custom_gripper_grasp_point',  # child frame
+    #             now,
+    #             timeout=rclpy.duration.Duration(seconds=1.0)
+    #         )
+
+    #         # Collect position and orientation samples
+    #         self.position_samples.append([
+    #             trans.transform.translation.x,
+    #             trans.transform.translation.y,
+    #             trans.transform.translation.z
+    #         ])
+    #         self.orientation_samples.append([
+    #             trans.transform.rotation.x,
+    #             trans.transform.rotation.y,
+    #             trans.transform.rotation.z,
+    #             trans.transform.rotation.w
+    #         ])
+
+    #         # Check if we have enough samples
+    #         if len(self.position_samples) >= self.max_samples:
+    #             # Calculate average position
+    #             avg_position = np.mean(self.position_samples, axis=0)
+    #             avg_orientation = np.mean(self.orientation_samples, axis=0)
+    #             avg_orientation /= np.linalg.norm(avg_orientation)  # Normalize quaternion
+
+    #             # Create averaged transform data
+    #             timestamp = trans.header.stamp.sec + trans.header.stamp.nanosec * 1e-9
+    #             tf_data = {
+    #                 'position': {
+    #                     'x': avg_position[0],
+    #                     'y': avg_position[1],
+    #                     'z': avg_position[2]
+    #                 },
+    #                 'orientation': {
+    #                     'x': avg_orientation[0],
+    #                     'y': avg_orientation[1],
+    #                     'z': avg_orientation[2],
+    #                     'w': avg_orientation[3]
+    #                 },
+    #                 'timestamp': timestamp,
+    #             }
+
+    #             # Publish to Redis
+    #             self.redis_client.set("custom_gripper_grasp_point_tf", json.dumps(tf_data))
+    #             self.get_logger().info(f"Published averaged TF to Redis: {tf_data}")
+
+    #             # Clear samples
+    #             self.position_samples.clear()
+    #             self.orientation_samples.clear()
+
+    #     except Exception as e:
+    #         self.get_logger().warn(f"Failed to get transform: {e}")
+
+    def publish_tool0_tf_to_redis(self):
+        try:
+            now = rclpy.time.Time()
+            trans: TransformStamped = self.tf_buffer.lookup_transform(
+                'mujuco_world',  # parent frame
+                'tool0',  # child frame
+                now,
+                timeout=rclpy.duration.Duration(seconds=1.0)
+            )
+            timestamp = trans.header.stamp.sec + trans.header.stamp.nanosec * 1e-9
+            position = {
+                'x': trans.transform.translation.x,
+                'y': trans.transform.translation.y,
+                'z': trans.transform.translation.z
+            }
+
+            orientation = {
+                'x': trans.transform.rotation.x,
+                'y': trans.transform.rotation.y,
+                'z': trans.transform.rotation.z,
+                'w': trans.transform.rotation.w
+            }
+
+            tf_data = {
+                'position': position,
+                'orientation': orientation,
+                'timestamp': timestamp,
+            }
+
+            self.redis_client.set("tool0_tf", json.dumps(tf_data))
+            # self.get_logger().info(f"Published Tool 0 TF to Redis : {tf_data}")
+
+        except Exception as e:
+            self.get_logger().warn(f"Failed to get transform: {e}")
+    
+    def publish_tf_wrt_sandboxcenter_to_redis(self):
+        try:
+            now = rclpy.time.Time()
+            trans: TransformStamped = self.tf_buffer.lookup_transform(
+                'simulation_sand_box_center',  # parent frame
+                'custom_gripper_grasp_point',  # child frame
+                now,
+                timeout=rclpy.duration.Duration(seconds=1.0)
+            )
+            timestamp = trans.header.stamp.sec + trans.header.stamp.nanosec * 1e-9
+            position = {
+                'x': trans.transform.translation.x,
+                'y': trans.transform.translation.y,
+                'z': trans.transform.translation.z
+            }
+
+            orientation = {
+                'x': trans.transform.rotation.x,
+                'y': trans.transform.rotation.y,
+                'z': trans.transform.rotation.z,
+                'w': trans.transform.rotation.w
+            }
+
+            tf_data = {
+                'position': position,
+                'orientation': orientation,
+                'timestamp': timestamp,
+            }
+
+            self.redis_client.set("custom_gripper_grasp_point_tf_wrt_sandbox_center", json.dumps(tf_data))
+            # self.get_logger().info(f"Published TF to Redis : {tf_data}")
 
         except Exception as e:
             self.get_logger().warn(f"Failed to get transform: {e}")
@@ -266,9 +401,9 @@ class GripperVelocityTracker(Node):
                         linear_speed = np.linalg.norm(linear_velocity)
                         angular_speed = np.linalg.norm(angular_velocity)
                         
-                        self.get_logger().info(
-                            f'Linear velocity: {linear_speed:.3f} m/s, Angular velocity: {angular_speed:.3f} rad/s'
-                        )
+                        # self.get_logger().info(
+                        #     f'Linear velocity: {linear_speed:.3f} m/s, Angular velocity: {angular_speed:.3f} rad/s'
+                        # )
             
             # Update previous transform and timestamp
             self.prev_transform = current_transform
@@ -351,63 +486,63 @@ class GripperVelocityTracker(Node):
 
 
 
-class SandBoxTransformPublisherNode(Node):
-    def __init__(self):
-        super().__init__('sandbox_transform_publisher_node')
+# class SandBoxTransformPublisherNode(Node):
+#     def __init__(self):
+#         super().__init__('sandbox_transform_publisher_node')
         
-        # Create a static transform broadcaster
-        self.tf_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
+#         # Create a static transform broadcaster
+#         self.tf_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
         
-        # Define the transforms to publish
-        transforms = []
+#         # Define the transforms to publish
+#         transforms = []
         
-        # Parent frame
-        parent_frame = 'tagStandard52h13:3'
+#         # Parent frame
+#         parent_frame = 'tagStandard52h13:3'
         
-        # Define offsets as (x, y, z) tuples
-        offsets = [
-            (0.0, 0.0, 0.0),
-            (0.3, 0.0, 0.0),
-            (0.0, 0.6, 0.0),
-            (0.3, 0.6, 0.0),
+#         # Define offsets as (x, y, z) tuples
+#         offsets = [
+#             (0.0, 0.0, 0.0),
+#             (0.3, 0.0, 0.0),
+#             (0.0, 0.6, 0.0),
+#             (0.3, 0.6, 0.0),
             
-            (0.0, 0.0, -0.09),
-            (0.3, 0.0, -0.09),
-            (0.0, 0.6, -0.09),
-            (0.3, 0.6, -0.09)
-        ]
+#             (0.0, 0.0, -0.09),
+#             (0.3, 0.0, -0.09),
+#             (0.0, 0.6, -0.09),
+#             (0.3, 0.6, -0.09)
+#         ]
         
-        # Create the transforms
-        for i, offset in enumerate(offsets):
-            # Create a transform message
-            transform = TransformStamped()
+#         # Create the transforms
+#         for i, offset in enumerate(offsets):
+#             # Create a transform message
+#             transform = TransformStamped()
             
-            # Set header information
-            transform.header.stamp = self.get_clock().now().to_msg()
-            transform.header.frame_id = parent_frame
+#             # Set header information
+#             transform.header.stamp = self.get_clock().now().to_msg()
+#             transform.header.frame_id = parent_frame
             
-            # Set child frame with a unique name based on the offset
-            transform.child_frame_id = f'sand_box_frame_{i+1}'
+#             # Set child frame with a unique name based on the offset
+#             transform.child_frame_id = f'sand_box_frame_{i+1}'
             
-            # Set translation (x, y, z)
-            transform.transform.translation.x = offset[0]
-            transform.transform.translation.y = offset[1]
-            transform.transform.translation.z = offset[2]
+#             # Set translation (x, y, z)
+#             transform.transform.translation.x = offset[0]
+#             transform.transform.translation.y = offset[1]
+#             transform.transform.translation.z = offset[2]
             
-            # Set rotation as identity quaternion (no rotation)
-            transform.transform.rotation.x = 0.0
-            transform.transform.rotation.y = 0.0
-            transform.transform.rotation.z = 0.0
-            transform.transform.rotation.w = 1.0
+#             # Set rotation as identity quaternion (no rotation)
+#             transform.transform.rotation.x = 0.0
+#             transform.transform.rotation.y = 0.0
+#             transform.transform.rotation.z = 0.0
+#             transform.transform.rotation.w = 1.0
             
-            transforms.append(transform)
+#             transforms.append(transform)
             
-            self.get_logger().info(f'Created transform: {transform.header.frame_id} -> {transform.child_frame_id}')
-            self.get_logger().info(f'Translation: ({offset[0]}, {offset[1]}, {offset[2]})')
+#             self.get_logger().info(f'Created transform: {transform.header.frame_id} -> {transform.child_frame_id}')
+#             self.get_logger().info(f'Translation: ({offset[0]}, {offset[1]}, {offset[2]})')
         
-        # Broadcast all transforms
-        self.tf_broadcaster.sendTransform(transforms)
-        self.get_logger().info(f'Published {len(transforms)} static transforms')
+#         # Broadcast all transforms
+#         self.tf_broadcaster.sendTransform(transforms)
+#         self.get_logger().info(f'Published {len(transforms)} static transforms')
         
         
 class SandBoxPointCloudSegmentation(Node):
@@ -433,7 +568,7 @@ class SandBoxPointCloudSegmentation(Node):
 
 
     def listener_callback(self, msg):
-        self.get_logger().info('Received point cloud')
+        # self.get_logger().info('Received point cloud')
 
         points = []
         for p in pc2.read_points(msg, field_names=("x", "y", "z"), skip_nans=True):
@@ -446,7 +581,7 @@ class SandBoxPointCloudSegmentation(Node):
 
 
 
-        self.get_logger().info(f"PointCloud shape: {cloud_points.shape}, dtype: {cloud_points.dtype}")
+        # self.get_logger().info(f"PointCloud shape: {cloud_points.shape}, dtype: {cloud_points.dtype}")
 
         if cloud_points.size == 0:
             self.get_logger().warn("PointCloud is empty. Skipping visualization.")
@@ -455,7 +590,7 @@ class SandBoxPointCloudSegmentation(Node):
         # Look up the transform
         try:
             transform: TransformStamped = self.tf_buffer.lookup_transform(
-                target_frame='sandbox_center',#'sandbox_center',
+                target_frame='simulation_sand_box_center',#'sandbox_center',
                 source_frame='zed2i_left_camera_frame',
                 time=rclpy.time.Time(),
                 timeout=rclpy.duration.Duration(seconds=1.0)
@@ -500,7 +635,7 @@ class SandBoxPointCloudSegmentation(Node):
             from std_msgs.msg import Header
             header = Header()
             header.stamp = self.get_clock().now().to_msg()
-            header.frame_id = 'sandbox_center'  
+            header.frame_id = 'simulation_sand_box_center'  
             # Convert to PointCloud2
             msg_out = pc2.create_cloud_xyz32(header, cropped_np.tolist())
 
@@ -526,33 +661,103 @@ from rclpy.duration import Duration
 from rclpy.time import Time
 
 
+# class FrameDifferencePublisher(Node):
+#     def __init__(self):
+#         super().__init__('frame_difference_publisher')
+#         self.tf_buffer = Buffer()
+#         self.tf_listener = TransformListener(self.tf_buffer, self)
+
+#         self.broadcaster = TransformBroadcaster(self)
+
+#         self.timer = self.create_timer(0.1, self.publish_difference)
+
+#     def publish_difference(self):
+#         try:
+#             # Get transform from sand_box_center to simulation_sand_box_center
+#             transform = self.tf_buffer.lookup_transform(
+#                 target_frame='sandbox_center',
+#                 source_frame='simulation_sand_box_center',
+#                 time=Time(),
+#                 timeout=Duration(seconds=1.0)
+#             )
+
+#             # Modify the frame_ids to indicate it's the difference
+#             transform.header.stamp = self.get_clock().now().to_msg()
+#             transform.header.frame_id = 'sand_box_center'
+#             transform.child_frame_id = 'difference_simulation_to_real'
+
+#             # Broadcast the difference transform
+#             self.broadcaster.sendTransform(transform)
+
+#         except Exception as e:
+#             self.get_logger().warn(f'Could not find transform: {e}')
+
+# class FrameDifferencePublisher(Node):
+#     def __init__(self):
+#         super().__init__('frame_difference_publisher')
+#         self.tf_buffer = Buffer()
+#         self.tf_listener = TransformListener(self.tf_buffer, self)
+
+#         self.broadcaster = TransformBroadcaster(self)
+
+#         self.timer = self.create_timer(0.1, self.publish_lookup)
+
+#     def publish_lookup(self):
+#         try:
+#             # Get transform from sand_box_center to simulation_sand_box_center
+#             transform = self.tf_buffer.lookup_transform(
+#                 target_frame='custom_gripper_grasp_point',
+#                 source_frame='mujuco_world',
+#                 time=Time(),
+#                 timeout=Duration(seconds=1.0)
+#             )
+
+           
+
+#         except Exception as e:
+#             self.get_logger().warn(f'Could not find transform: {e}')
+
+from geometry_msgs.msg import PoseStamped
+
 class FrameDifferencePublisher(Node):
     def __init__(self):
         super().__init__('frame_difference_publisher')
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.broadcaster = TransformBroadcaster(self)
+      
+        # Create a publisher for PoseStamped
+        self.pose_publisher = self.create_publisher(PoseStamped, '/transform_between_mujuco_world_to_custom_gripper_grasp_point', 10)
 
-        self.timer = self.create_timer(0.1, self.publish_difference)
+        self.timer = self.create_timer(0.1, self.publish_lookup)
 
-    def publish_difference(self):
+    def publish_lookup(self):
         try:
             # Get transform from sand_box_center to simulation_sand_box_center
             transform = self.tf_buffer.lookup_transform(
-                target_frame='sandbox_center',
-                source_frame='simulation_sand_box_center',
+                target_frame='custom_gripper_grasp_point',
+                source_frame='mujuco_world',
                 time=Time(),
                 timeout=Duration(seconds=1.0)
             )
 
-            # Modify the frame_ids to indicate it's the difference
-            transform.header.stamp = self.get_clock().now().to_msg()
-            transform.header.frame_id = 'sand_box_center'
-            transform.child_frame_id = 'difference_simulation_to_real'
+            # Convert the transform to a PoseStamped message
+            pose_msg = PoseStamped()
+            pose_msg.header.stamp = self.get_clock().now().to_msg()
+            pose_msg.header.frame_id = 'mujuco_world'
 
-            # Broadcast the difference transform
-            self.broadcaster.sendTransform(transform)
+            pose_msg.pose.position.x = transform.transform.translation.x
+            pose_msg.pose.position.y = transform.transform.translation.y
+            pose_msg.pose.position.z = transform.transform.translation.z
+
+            pose_msg.pose.orientation.x = transform.transform.rotation.x
+            pose_msg.pose.orientation.y = transform.transform.rotation.y
+            pose_msg.pose.orientation.z = transform.transform.rotation.z
+            pose_msg.pose.orientation.w = transform.transform.rotation.w
+
+            # Publish the PoseStamped message
+            self.pose_publisher.publish(pose_msg)
+            # self.get_logger().info(f'Published PoseStamped: {pose_msg}')
 
         except Exception as e:
             self.get_logger().warn(f'Could not find transform: {e}')
@@ -631,23 +836,29 @@ class ROSBridge:
         
         self.redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
         
-        self.tf_publisher = TFToRedisPublisher(self.redis_client)
+        self.tf_publisher = EndEffectorTFToRedisPublisher(self.redis_client)
         self.executor2 = SingleThreadedExecutor()
         self.executor2.add_node(self.tf_publisher)
         self.executor_thread2 = threading.Thread(target=self.spin_executor2, daemon=True)     
         self.executor_thread2.start()
         
-        self.gripper_velocity_tracker=GripperVelocityTracker(self.redis_client)
-        self.executor3 = SingleThreadedExecutor()
-        self.executor3.add_node(self.gripper_velocity_tracker)
-        self.executor_thread3 = threading.Thread(target=self.spin_executor3, daemon=True)     
-        self.executor_thread3.start()
+        # self.gripper_velocity_tracker=GripperVelocityTracker(self.redis_client)
+        # self.executor3 = SingleThreadedExecutor()
+        # self.executor3.add_node(self.gripper_velocity_tracker)
+        # self.executor_thread3 = threading.Thread(target=self.spin_executor3, daemon=True)     
+        # self.executor_thread3.start()
         
         # self.temporary_node = TransformAverager()
         # self.executor4 = SingleThreadedExecutor()
         # self.executor4.add_node(self.temporary_node)
         # self.executor_thread4 = threading.Thread(target=self.spin_executor4, daemon=True)     
         # self.executor_thread4.start()
+        
+        self.temporary_node = FrameDifferencePublisher()
+        self.executor4 = SingleThreadedExecutor()
+        self.executor4.add_node(self.temporary_node)
+        self.executor_thread4 = threading.Thread(target=self.spin_executor4, daemon=True)     
+        self.executor_thread4.start()
         
         self.point_cloud_segmentation = SandBoxPointCloudSegmentation()
         self.executor5 = SingleThreadedExecutor()
@@ -789,8 +1000,8 @@ if __name__ == '__main__':
                 print(f"Received task: {message}")
                 try:
                     joint_positions = json.loads(message)
-                    joint_positions[0] += (3.14 / 2)
-                    joint_positions[5] += (3.14 / 4)
+                    joint_positions[0] += (np.pi / 2)
+                    joint_positions[5] += (np.pi / 4)
 
                     bridge.publish_joint_angles(joint_positions)
                     response = "successfully published joints"
