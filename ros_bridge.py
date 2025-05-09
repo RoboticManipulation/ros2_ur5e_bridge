@@ -22,7 +22,7 @@ import numpy as np
 from geometry_msgs.msg import Vector3
 
 
-from sensor_msgs.msg import PointCloud2
+from sensor_msgs.msg import PointCloud2,Image
 import sensor_msgs_py.point_cloud2 as pc2
 import open3d as o3d
 
@@ -30,6 +30,8 @@ from scipy.spatial.transform import Rotation as R
 from geometry_msgs.msg import TransformStamped
 import zlib
 import pickle
+from cv_bridge import CvBridge
+import cv2
 
 
 REDIS_HOST = "172.17.0.1"  
@@ -225,7 +227,7 @@ class URController(Node):
             '/joint_trajectory_controller/follow_joint_trajectory'
         )
 
-    def send_goal_sync(self,joint_positions):
+    def send_goal_sync(self,joint_positions,time_for_execution=3):
         """Send the trajectory goal synchronously and print the result."""
         # Wait until the action server is available
         self._client.wait_for_server()
@@ -245,13 +247,14 @@ class URController(Node):
         # Create a single trajectory point
         point = JointTrajectoryPoint()
         point.positions = joint_positions
-        point.time_from_start.sec = 3  # 5 seconds
+        point.time_from_start.sec = time_for_execution  # 5 seconds
         point.time_from_start.nanosec = 0
 
         goal_msg.trajectory.points.append(point)
 
         # Send goal asynchronously, but block (spin) until it completes
         self.get_logger().info('Sending goal...')
+        print(f"Goal message : {goal_msg}")
         send_goal_future = self._client.send_goal_async(goal_msg)
         rclpy.spin_until_future_complete(self, send_goal_future)
 
@@ -653,8 +656,7 @@ class SandBoxPointCloudSegmentation(Node):
     def get_latest_pointcloud(self):
         return zlib.compress(pickle.dumps(self.latest_segmented_point_cloud))
     
-import rclpy
-from rclpy.node import Node
+
 from tf2_ros import TransformBroadcaster, Buffer, TransformListener
 from geometry_msgs.msg import TransformStamped
 from rclpy.duration import Duration
@@ -819,7 +821,24 @@ class TransformAverager(Node):
         self.get_logger().info(f"Averaged Translation: {avg_translation}")
         self.get_logger().info(f"Averaged Quaternion: {avg_quat}")
 
+class ZEDCameraStreaming(Node):
+    def __init__(self,redis_client):
+        super().__init__('image_redis_streamer')
+        self.bridge = CvBridge()
+        self.redis_client = redis_client
+        self.subscription = self.create_subscription(
+            Image,
+            '/zed2i/zed_node/left/image_rect_color',
+            self.image_callback,
+            10)
 
+    def image_callback(self, msg):
+        try:
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+            _, encoded_img = cv2.imencode('.jpg', cv_image)
+            self.redis_client.set('zed2i_image_frame', encoded_img.tobytes())
+        except Exception as e:
+            self.get_logger().error(f"Error: {e}")
 
 
 class ROSBridge:
@@ -866,6 +885,11 @@ class ROSBridge:
         self.executor_thread5 = threading.Thread(target=self.spin_executor5, daemon=True)     
         self.executor_thread5.start()
 
+        self.camera_streaming = ZEDCameraStreaming(self.redis_client)
+        self.executor6 = SingleThreadedExecutor()
+        self.executor6.add_node(self.camera_streaming)
+        self.executor_thread6 = threading.Thread(target=self.spin_executor6, daemon=True)     
+        self.executor_thread6.start()
 
         
     def spin_executor1(self):
@@ -913,9 +937,18 @@ class ROSBridge:
         finally:
             self.executor5.shutdown()
             
+    def spin_executor6(self):
+        try:
+            self.executor6.spin()
+           
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.executor6.shutdown()
             
-    def publish_joint_angles(self, joint_positions):
-        self.joint_trajectory_client.send_goal_sync(joint_positions)
+            
+    def publish_joint_angles(self, joint_positions,time_for_execution=3):
+        self.joint_trajectory_client.send_goal_sync(joint_positions,time_for_execution)
         
     def get_latest_pointcloud(self):
         return self.point_cloud_segmentation.get_latest_pointcloud()
@@ -999,11 +1032,17 @@ if __name__ == '__main__':
             if queue_name == "joints_queue":
                 print(f"Received task: {message}")
                 try:
-                    joint_positions = json.loads(message)
+                    
+                   # Parse the payload
+                    payload = json.loads(message)
+                    joint_positions = payload["joint_angles"]
+                    time_for_execution = payload["time_for_execution"]
+                    # joint positions send from sand-gym mujuco
                     joint_positions[0] += (np.pi / 2)
                     joint_positions[5] += (np.pi / 4)
-
-                    bridge.publish_joint_angles(joint_positions)
+                    time_for_execution = 3
+                    bridge.publish_joint_angles(joint_positions,time_for_execution)
+                    # print(f"Published joint angles: {joint_positions}")
                     response = "successfully published joints"
 
                 except (json.JSONDecodeError, TypeError):
