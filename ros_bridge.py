@@ -44,9 +44,9 @@ class EndEffectorTFToRedisPublisher(Node):
         self.tf_listener = TransformListener(self.tf_buffer, self)
         self.redis_client = redis_client
 
-        self.timer = self.create_timer(0.5, self.publish_tf_to_redis)  # every 0.5s
-        self.timer = self.create_timer(0.5, self.publish_tool0_tf_to_redis)  # every 0.5s
-        self.timer = self.create_timer(0.5, self.publish_tf_wrt_sandboxcenter_to_redis)  # every 0.5s
+        self.timer = self.create_timer(0.025, self.publish_tf_to_redis)  # every 0.5s
+        self.timer = self.create_timer(0.025, self.publish_tool0_tf_to_redis)  # every 0.5s
+        self.timer = self.create_timer(0.025, self.publish_tf_wrt_sandboxcenter_to_redis)  # every 0.5s
         
         # Buffers to store samples
         # self.position_samples = []
@@ -218,7 +218,7 @@ class EndEffectorTFToRedisPublisher(Node):
 
 
 class URController(Node):
-    def __init__(self):
+    def __init__(self, redis_client):
         super().__init__('follow_joint_trajectory_sync_client')
         # Create the action client for FollowJointTrajectory
         self._client = ActionClient(
@@ -226,6 +226,7 @@ class URController(Node):
             FollowJointTrajectory,
             '/joint_trajectory_controller/follow_joint_trajectory'
         )
+        self.redis_client = redis_client
 
     def send_goal_sync(self,joint_positions,time_for_execution=3):
         """Send the trajectory goal synchronously and print the result."""
@@ -274,6 +275,9 @@ class URController(Node):
         result = get_result_future.result().result
         self.get_logger().info(f'Goal finished. Result: {result}')
         print(f'Goal finished. Result: {result}') 
+        response = f'Sending Back Response: Goal finished. Result: {result}'
+        print(response)
+        self.redis_client.lpush("joints_response_queue", response)
 
 
 class GripperVelocityTracker(Node):
@@ -843,17 +847,18 @@ class ZEDCameraStreaming(Node):
 
 class ROSBridge:
   
-    def __init__(self):
+    def __init__(self,redis_client):
         rclpy.init()
   
-        self.joint_trajectory_client = URController()
+        self.redis_client = redis_client #redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        self.joint_trajectory_client = URController(self.redis_client)
         self.robot_joint_position = []
         self.executor1 = SingleThreadedExecutor()
         self.executor1.add_node(self.joint_trajectory_client)
         self.executor_thread1 = threading.Thread(target=self.spin_executor1, daemon=True)     
         self.executor_thread1.start()
         
-        self.redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        
         
         self.tf_publisher = EndEffectorTFToRedisPublisher(self.redis_client)
         self.executor2 = SingleThreadedExecutor()
@@ -996,7 +1001,7 @@ if __name__ == '__main__':
     
     # Clear the queue before starting (to remove any message from previous sand_gym session)
     r.delete("joints_queue")
-    bridge = ROSBridge()
+    bridge = ROSBridge(redis_client=r)
     print('Running UR5e Bridge')
     
     # while True:
@@ -1040,15 +1045,15 @@ if __name__ == '__main__':
                     # joint positions send from sand-gym mujuco
                     joint_positions[0] += (np.pi / 2)
                     joint_positions[5] += (np.pi / 4)
-                    time_for_execution = 3
-                    bridge.publish_joint_angles(joint_positions,time_for_execution)
+                
+                    bridge.publish_joint_angles(joint_positions,int(time_for_execution))
                     # print(f"Published joint angles: {joint_positions}")
                     response = "successfully published joints"
 
                 except (json.JSONDecodeError, TypeError):
                     response = "Something wrong publishing joints"
 
-                r.lpush("joints_response_queue", response)
+                # r.lpush("joints_response_queue", response)
 
             elif queue_name == "pointcloud_request":
                 print("Received pointcloud request!")
