@@ -185,7 +185,7 @@ class EndEffectorTFToRedisPublisher(Node):
         try:
             now = rclpy.time.Time()
             trans: TransformStamped = self.tf_buffer.lookup_transform(
-                'simulation_sand_box_center',  # parent frame
+                'simulation_sand_box_center',  # parent frame simulation_sand_box_center sandbox_center
                 'custom_gripper_grasp_point',  # child frame
                 now,
                 timeout=rclpy.duration.Duration(seconds=1.0)
@@ -597,7 +597,7 @@ class SandBoxPointCloudSegmentation(Node):
         # Look up the transform
         try:
             transform: TransformStamped = self.tf_buffer.lookup_transform(
-                target_frame='simulation_sand_box_center',#'sandbox_center',
+                target_frame='simulation_sand_box_center',#'sandbox_center', simulation_sand_box_center
                 source_frame='zed2i_left_camera_frame',
                 time=rclpy.time.Time(),
                 timeout=rclpy.duration.Duration(seconds=1.0)
@@ -625,7 +625,8 @@ class SandBoxPointCloudSegmentation(Node):
             
             bbox = o3d.geometry.AxisAlignedBoundingBox(
                 min_bound=(-0.15, -0.3, 0.0),  # bottom corner
-                max_bound=(0.15, 0.3, 0.1)     # top corner
+                # max_bound=(0.15, 0.3, 0.1)     # top corner
+                max_bound=(0.15, 0.3, 0.07)     # top corner
             )
             bbox.color = (0, 0, 1)  # Blue box
             pcd = pcd.crop(bbox)
@@ -642,7 +643,7 @@ class SandBoxPointCloudSegmentation(Node):
             from std_msgs.msg import Header
             header = Header()
             header.stamp = self.get_clock().now().to_msg()
-            header.frame_id = 'simulation_sand_box_center'  
+            header.frame_id = "simulation_sand_box_center" # 'simulation_sand_box_center'   sandbox_center
             # Convert to PointCloud2
             msg_out = pc2.create_cloud_xyz32(header, cropped_np.tolist())
 
@@ -830,10 +831,16 @@ class ZEDCameraStreaming(Node):
         super().__init__('image_redis_streamer')
         self.bridge = CvBridge()
         self.redis_client = redis_client
-        self.subscription = self.create_subscription(
+        self.camera_image_subscription = self.create_subscription(
             Image,
             '/zed2i/zed_node/left/image_rect_color',
             self.image_callback,
+            10)
+        
+        self.camera_depth_image_subscription = self.create_subscription(
+            Image,
+            '/zed2i/zed_node/depth/depth_registered',
+            self.depth_image_callback,
             10)
 
     def image_callback(self, msg):
@@ -843,6 +850,18 @@ class ZEDCameraStreaming(Node):
             self.redis_client.set('zed2i_image_frame', encoded_img.tobytes())
         except Exception as e:
             self.get_logger().error(f"Error: {e}")
+            
+
+    
+    def depth_image_callback(self, msg):
+        try:
+            depth_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='32FC1')
+            serialized_image = pickle.dumps(depth_image)
+            self.redis_client.set('zed2i_depth_image_frame', serialized_image)
+        except Exception as e:
+            self.get_logger().error(f"Error processing depth image: {e}")
+        
+        
 
 
 class ROSBridge:
